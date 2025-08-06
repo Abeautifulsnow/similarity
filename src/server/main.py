@@ -2,13 +2,24 @@ import argparse
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
+from collections import defaultdict
+from typing import (
+    Any,
+    Dict,
+    Generic,
+    List,
+    Literal,
+    Optional,
+    TypeVar,
+    cast,
+)
 
 import httpx
 
 # import uvicorn
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
+from typing_extensions import TypedDict
 
 parser = argparse.ArgumentParser(
     description="Smart Patrol Inspection MCP Server"
@@ -167,20 +178,25 @@ async def get_all_projects(project_type: Optional[str] = None) -> Dict | str:
 
 
 async def get_eq_insCode_by_project_insCode_and_modelCode(
-    project_insCode: str, eqModelCode: str
-) -> Dict | str:
+    project_insCode: str, eqModelCode: str, eqModelName: str
+) -> Dict[str, Dict]:
     """根据项目实例码和设备模型码获取所有的设备实例码
 
     Args:
         project_insCode (str): 项目的实例码
         eqModelCode (str): 设备的模型码
+        eqModelName (str): 设备的模型名称
     """
 
     route = "/common/ins/list"
     method = "GET"
     params: Dict = {"dataCode": project_insCode, "modelDataCode": eqModelCode}
     data: Dict = {}
-    return await request_dt(route, method=method, data=data, params=params)
+    response = await request_dt(route, method=method, data=data, params=params)
+    if isinstance(response, str):
+        return {}
+    else:
+        return {eqModelName: response}
 
 
 async def get_model_tree_by_project_model_code(
@@ -225,17 +241,19 @@ def recursive_find_model_code(
     return results
 
 
-async def get_eq_model_code(project_model_code: str, eq_name: str) -> List[str]:
+async def get_eq_model_code(
+    project_model_code: str, eq_name: str
+) -> Dict[str, List[str]]:
     """获取设备模型码"""
 
     resp = await get_model_tree_by_project_model_code(project_model_code)
     if isinstance(resp, str):
-        return []
+        return {}
 
     model_tree = resp.get("data", [])
 
     # 通过"nodeType": "eq"和"modelName": "xxx"来一起匹配
-    return recursive_find_model_code(model_tree, eq_name)
+    return {eq_name: recursive_find_model_code(model_tree, eq_name)}
 
 
 def filter_dict(data: Dict | List, keys: List[str]) -> Dict | List:
@@ -250,13 +268,13 @@ def filter_dict(data: Dict | List, keys: List[str]) -> Dict | List:
         return {k: v for k, v in data.items() if k not in keys}
 
 
-@mcp.tool(name="get_instances_by_model_code")
+# @mcp.tool(name="get_instances_by_model_code")
 async def get_instances_in_dt(
     project_name: str = Field(description="项目名称"),
     model_names: List[str] = Field(
         description="[系统/站/单元/设备]类别名称列表"
     ),
-) -> List[Dict | List | str] | str:
+):
     """根据项目名称和设备实例名称列表获取设备实例信息
 
     Args:
@@ -270,7 +288,7 @@ async def get_instances_in_dt(
     all_projects = await get_all_projects(None)
 
     if isinstance(all_projects, str):
-        return all_projects
+        return []
 
     data = all_projects["data"]
     project_insCode: str = ""
@@ -286,89 +304,213 @@ async def get_instances_in_dt(
         get_eq_model_code(project_model_code, eq_name)
         for eq_name in model_names
     ]
-    model_codes_ = await asyncio.gather(*tasks)
+    # [{模型名称: [模型码1, 模型码2, ...]}]
+    eq_name_model_codes_ = await asyncio.gather(*tasks)
     # 对模型码进行去重
-    model_codes = [item for sublist in model_codes_ for item in sublist]
+    eq_model_codes: Dict[str, str] = {}
+    for subitem in eq_name_model_codes_:
+        # 模型名称:[模型码, ...]
+        for eq_model_name, model_codes_ in subitem.items():
+            for model_code in model_codes_:
+                eq_model_codes[model_code] = eq_model_name
+
     results = await asyncio.gather(
         *[
             get_eq_insCode_by_project_insCode_and_modelCode(
-                project_insCode, ins_code
+                project_insCode, eq_model_code, eq_model_name
             )
-            for ins_code in set(model_codes)
+            for eq_model_code, eq_model_name in eq_model_codes.items()
         ]
     )
-
     return [
-        filter_dict(DTResponse[Dict | List](**res).data, ["insId"])
+        {
+            eq_model_name: filter_dict(
+                DTResponse[Dict | List](**res).data, ["insId"]
+            )
+        }
         if isinstance(res, dict)
-        else res
-        for res in results
+        else {eq_model_name: res}
+        for _res in results
+        for eq_model_name, res in _res.items()
     ]
 
 
-@mcp.tool(name="get_dynamic_prop_list")
-async def get_dynamic_prop_list(
-    dataCodes: List[str] = Field(description="设备实例的数字化编码列表"),
-) -> List[Dict | str]:
-    """获取`设备`动态属性列表.
+# @mcp.tool(name="get_dynamic_prop_list")
+# async def get_dynamic_prop_list(
+#     dataCodes: List[str] = Field(description="设备实例的数字化编码列表"),
+# ) -> List[Dict | str]:
+#     """获取`设备`动态属性列表.
+
+#     Args:
+#         dataCodes (List[str]): 设备实例的数字化编码列表, **必填**.
+
+#     Returns:
+#         List[Dict | str]: 动态属性列表的数据或错误消息.
+#     """
+
+#     route = "/v1/ins/eq/page/dynamic"
+
+#     def _compose_data_code_params(_dataCodes: List[str]) -> List[Dict]:
+#         _data: Dict = {
+#             "propTypes": [],
+#             "propCode": None,
+#             "propName": None,
+#             "pageNumber": 1,
+#             "pageSize": 500,
+#         }
+#         return [{**_data, "dataCode": dataCode} for dataCode in _dataCodes]
+
+#     data_params = _compose_data_code_params(dataCodes)
+
+#     async def handle_request(data: Dict) -> Dict | str:
+#         resp = await request_dt(route, method="POST", data=data, params={})
+
+#         if isinstance(resp, str):
+#             return {data["dataCode"]: resp}
+#         else:
+#             datas = resp["data"]["records"]
+
+#             new_datas = []
+#             for d in datas:
+#                 new_datas.append(
+#                     {
+#                         "dataCode": d["dataCode"],
+#                         "propName": d["propName"],
+#                     }
+#                 )
+
+#             return {data["dataCode"]: new_datas}
+
+#     results = await asyncio.gather(
+#         *[handle_request(data) for data in data_params]
+#     )
+
+#     return results
+
+
+async def request_ins_dyinfo_batch(ins_data_codes: List[str]) -> Dict | str:
+    """批量获取实例设备的属性信息"""
+
+    route = "/common/batch/all"
+    data = {"dataCodes": ins_data_codes, "propGroups": ["dynamic"]}
+
+    response = await request_dt(route, method="POST", data=data, params={})
+    return response
+
+
+class PropertyModel(TypedDict):
+    dataCode: str
+    propName: str
+
+
+class AgentInspectModel(TypedDict):
+    dataCode: str
+    device: str
+    inspectionContent: List[PropertyModel]
+
+
+@mcp.tool("get_inspect_contents_by_project_and_eq_model_code_and_prop_names")
+async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
+    project_name: str = Field(description="项目名称"),
+    eq_props_names: List[
+        Dict[Literal["name", "props"], str | List[str]]
+    ] = Field(
+        description="设备名称列表和属性列表",
+        examples=[
+            [{"name": "设备名称", "props": ["属性名称1", "属性名称2", "..."]}]
+        ],
+    ),
+) -> List[AgentInspectModel] | str:
+    """根据项目名称、设备类别名称和属性名称获取属性的检验内容.
 
     Args:
-        dataCodes (List[str]): 设备实例的数字化编码列表, **必填**.
+        project_name (str): 项目名称.
+        eq_props_names (List[str]): 设备名称列表和属性列表. Eg. `[{name: 设备名称, props: [属性名称1, 属性名称2...]}]`
 
     Returns:
-        List[Dict | str]: 动态属性列表的数据或错误消息.
+        List[AgentInspectModel]: 属性的检验内容列表. Eg. `[{dataCode: 设备编码, device: 设备名称, inspectionContent: [{dataCode: 属性编码, propName: 属性名称}]}]`
     """
 
-    route = "/v1/ins/eq/page/dynamic"
-
-    def _compose_data_code_params(_dataCodes: List[str]) -> List[Dict]:
-        _data: Dict = {
-            "propTypes": [],
-            "propCode": None,
-            "propName": None,
-            "pageNumber": 1,
-            "pageSize": 500,
-        }
-        return [{**_data, "dataCode": dataCode} for dataCode in _dataCodes]
-
-    data_params = _compose_data_code_params(dataCodes)
-
-    async def handle_request(data: Dict) -> Dict | str:
-        resp = await request_dt(route, method="POST", data=data, params={})
-
-        if isinstance(resp, str):
-            return {data["dataCode"]: resp}
-        else:
-            datas = resp["data"]["records"]
-
-            new_datas = []
-            for d in datas:
-                new_datas.append(
-                    {
-                        "dataCode": d["dataCode"],
-                        "propName": d["propName"],
-                        # "unit": d["unit"],
-                        # "propVal": d["propVal"],
-                        # # 新增
-                        # "dT": d["dataType"],  # 数据类型: 二值/菜单/数值/描述/其他
-                        # # "menuGroup": d["menuGroup"],  # 菜单
-                        # "mT": d["menuType"],  # 菜单
-                        # "p": d["p"],  # 数值精度. 整型没有精度
-                        # "nT": d["numType"],  # 数值类型
-                        # "oT": d["otherType"],  # 其他类型: DT-时间/SD-结构化
-                        # "sF": d["singleFlag"],  # 0多选, 1多选
-                        # # "tfGroup": d["tfGroup"],  # 二值分类
-                        # "tT": d["tfType"],  # 二值类型
-                    }
-                )
-
-            return {data["dataCode"]: new_datas}
-
-    results = await asyncio.gather(
-        *[handle_request(data) for data in data_params]
+    # {eq_code: [eq_props1, ...]}
+    # 关联设备模型名称与模型实例码
+    model_names = cast(List[str], [e["name"] for e in eq_props_names])
+    instances = cast(
+        List[Dict[str, List[Dict[str, str]] | Dict]],
+        await get_instances_in_dt(project_name, model_names),
     )
 
-    return results
+    eq_datas: Dict[str, str] = {}
+    eq_ins_code_model_name: Dict[str, str] = {}
+    for ins in instances:
+        for eq_model_name, _ins in ins.items():
+            if isinstance(_ins, dict):
+                eq_datas[_ins["dataCode"]] = _ins["insName"]
+                eq_ins_code_model_name[_ins["dataCode"]] = eq_model_name
+            elif isinstance(_ins, list):
+                for item in _ins:
+                    if isinstance(item, dict):
+                        eq_datas[item["dataCode"]] = item["insName"]
+                        eq_ins_code_model_name[item["dataCode"]] = eq_model_name
+
+    prop_resp = await request_ins_dyinfo_batch(list(eq_datas.keys()))
+    if isinstance(prop_resp, str):
+        return prop_resp
+    elif isinstance(prop_resp, dict):
+        datas: List[Dict] = prop_resp.get("data", [])
+        classify_props: Dict[str, List[PropertyModel]] = defaultdict(list)
+        for data in datas:
+            single_datas = data.get("dynamicProperties", [])
+            for s_d in single_datas:
+                ins_code = s_d["insDataCode"]
+                classify_props[ins_code].append(
+                    {"dataCode": s_d["dataCode"], "propName": s_d["propName"]}
+                )
+
+        print("##################################")
+        print(eq_ins_code_model_name)
+        print("##################################")
+
+        # 归类模型名称和属性名称
+        model_name_mcp_props_name = {}
+        for _eq_prop in eq_props_names:
+            model_name_mcp_props_name[_eq_prop["name"]] = _eq_prop["props"]
+
+        new_datas: List[AgentInspectModel] = []
+        for eq_code, eq_name in eq_datas.items():
+            # 获取到指定设备的属性信息
+            eq_code_props = classify_props.get(eq_code, [])
+            # 设备实例码对应的设备模型名称
+            eq_code_map_model_name = eq_ins_code_model_name.get(eq_code, "")
+            _inspect_contents: List[PropertyModel] = []
+
+            new_inspect_contents: List[PropertyModel] = []
+            # 通过设备实例码获取设备模型名称对应的属性名称列表
+            current_eq_code_param_props: List[str] = (
+                model_name_mcp_props_name.get(eq_code_map_model_name, [])
+            )
+            print("---------------------------")
+            print(current_eq_code_param_props)
+            print("***************************")
+            print(eq_code_props)
+            for param_prop_name in current_eq_code_param_props:
+                _p = PropertyModel(dataCode="", propName=param_prop_name)
+                for prop in eq_code_props:
+                    prop_name = prop["propName"]
+                    if _p["propName"] == prop_name:
+                        _p["dataCode"] = prop["dataCode"]
+
+                new_inspect_contents.append(_p)
+
+            new_datas.append(
+                AgentInspectModel(
+                    dataCode=eq_code,
+                    device=eq_name,
+                    inspectionContent=new_inspect_contents,
+                )
+            )
+        return new_datas
+    else:
+        return []
 
 
 @mcp.tool("query_realtime_data_batch_by_dynamic")
