@@ -453,22 +453,22 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
                         eq_ins_code_model_name[item["dataCode"]] = eq_model_name
 
     prop_resp = await request_ins_dyinfo_batch(list(eq_datas.keys()))
+
     if isinstance(prop_resp, str):
         return prop_resp
     elif isinstance(prop_resp, dict):
         datas: List[Dict] = prop_resp.get("data", [])
         classify_props: Dict[str, List[PropertyModel]] = defaultdict(list)
         for data in datas:
-            single_datas = data.get("dynamicProperties", [])
-            for s_d in single_datas:
-                ins_code = s_d["insDataCode"]
-                classify_props[ins_code].append(
-                    {"dataCode": s_d["dataCode"], "propName": s_d["propName"]}
-                )
-
-        print("##################################")
-        print(eq_ins_code_model_name)
-        print("##################################")
+            if single_datas := data.get("dynamicProperties", []):
+                for s_d in single_datas:
+                    if ins_code := s_d.get("insDataCode"):
+                        classify_props[ins_code].append(
+                            {
+                                "dataCode": s_d["dataCode"],
+                                "propName": s_d["propName"],
+                            }
+                        )
 
         # 归类模型名称和属性名称
         model_name_mcp_props_name = {}
@@ -488,10 +488,6 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
             current_eq_code_param_props: List[str] = (
                 model_name_mcp_props_name.get(eq_code_map_model_name, [])
             )
-            print("---------------------------")
-            print(current_eq_code_param_props)
-            print("***************************")
-            print(eq_code_props)
             for param_prop_name in current_eq_code_param_props:
                 _p = PropertyModel(dataCode="", propName=param_prop_name)
                 for prop in eq_code_props:
