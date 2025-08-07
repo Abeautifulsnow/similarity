@@ -21,9 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-parser = argparse.ArgumentParser(
-    description="Smart Patrol Inspection MCP Server"
-)
+parser = argparse.ArgumentParser(description="Smart Patrol Inspection MCP Server")
 parser.add_argument(
     "-p",
     "--port",
@@ -122,16 +120,13 @@ async def request_dt(
     """
 
     base_url = (
-        os.getenv("DT_URL", args.url)
-        or "http://112.126.99.154:8823/bk/siact-sec-api"
+        os.getenv("DT_URL", args.url) or "http://112.126.99.154:8823/bk/siact-sec-api"
     )
     if not base_url:
         raise ValueError("DT_URL environment variable not set")
 
     try:
-        async with httpx.AsyncClient(
-            base_url=base_url, timeout=timeout
-        ) as client:
+        async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
             logger.debug(f"[Request Url] ==> {base_url + route}")
 
             if method == "POST":
@@ -172,9 +167,7 @@ async def get_all_projects(project_type: Optional[str] = None) -> Dict | str:
     else:
         params = {"proType": project_type.upper()}
 
-    return await request_dt(
-        route, method="GET", data={}, params=params, timeout=30
-    )
+    return await request_dt(route, method="GET", data={}, params=params, timeout=30)
 
 
 async def get_eq_insCode_by_project_insCode_and_modelCode(
@@ -259,8 +252,7 @@ def filter_dict(data: Dict | List, keys: List[str]) -> Dict | List:
 
     if isinstance(data, list):
         return [
-            filter_dict(item, keys) if isinstance(item, dict) else item
-            for item in data
+            filter_dict(item, keys) if isinstance(item, dict) else item for item in data
         ]
     else:
         return {k: v for k, v in data.items() if k not in keys}
@@ -269,9 +261,7 @@ def filter_dict(data: Dict | List, keys: List[str]) -> Dict | List:
 # @mcp.tool(name="get_instances_by_model_code")
 async def get_instances_in_dt(
     project_name: str = Field(description="项目名称"),
-    model_names: List[str] = Field(
-        description="[系统/站/单元/设备]类别名称列表"
-    ),
+    model_names: List[str] = Field(description="[系统/站/单元/设备]类别名称列表"),
 ):
     """根据项目名称和设备实例名称列表获取设备实例信息
 
@@ -298,10 +288,7 @@ async def get_instances_in_dt(
             break
 
     # 并发获取项目下所有设备实例的insCode, 需要解构
-    tasks = [
-        get_eq_model_code(project_model_code, eq_name)
-        for eq_name in model_names
-    ]
+    tasks = [get_eq_model_code(project_model_code, eq_name) for eq_name in model_names]
     # [{模型名称: [模型码1, 模型码2, ...]}]
     eq_name_model_codes_ = await asyncio.gather(*tasks)
     # 对模型码进行去重
@@ -321,11 +308,7 @@ async def get_instances_in_dt(
         ]
     )
     return [
-        {
-            eq_model_name: filter_dict(
-                DTResponse[Dict | List](**res).data, ["insId"]
-            )
-        }
+        {eq_model_name: filter_dict(DTResponse[Dict | List](**res).data, ["insId"])}
         if isinstance(res, dict)
         else {eq_model_name: res}
         for _res in results
@@ -410,13 +393,9 @@ class AgentInspectModel(TypedDict):
 @mcp.tool("get_inspect_contents_by_project_and_eq_model_code_and_prop_names")
 async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
     project_name: str = Field(description="项目名称"),
-    eq_props_names: List[
-        Dict[Literal["name", "props"], str | List[str]]
-    ] = Field(
+    eq_props_names: List[Dict[Literal["name", "props"], str | List[str]]] = Field(
         description="设备名称列表和属性列表",
-        examples=[
-            [{"name": "设备名称", "props": ["属性名称1", "属性名称2", "..."]}]
-        ],
+        examples=[[{"name": "设备名称", "props": ["属性名称1", "属性名称2", "..."]}]],
     ),
 ) -> List[AgentInspectModel] | str:
     """根据项目名称、设备类别名称和属性名称获取属性的检验内容.
@@ -443,13 +422,15 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
     for ins in instances:
         for eq_model_name, _ins in ins.items():
             if isinstance(_ins, dict):
-                eq_datas[_ins["dataCode"]] = _ins["insName"]
-                eq_ins_code_model_name[_ins["dataCode"]] = eq_model_name
+                _ins_data_code = _ins["dataCode"]
+                eq_datas[_ins_data_code] = _ins["insName"]
+                eq_ins_code_model_name[_ins_data_code] = eq_model_name
             elif isinstance(_ins, list):
                 for item in _ins:
                     if isinstance(item, dict):
-                        eq_datas[item["dataCode"]] = item["insName"]
-                        eq_ins_code_model_name[item["dataCode"]] = eq_model_name
+                        item_data_code = item["dataCode"]
+                        eq_datas[item_data_code] = item["insName"]
+                        eq_ins_code_model_name[item_data_code] = eq_model_name
 
     prop_resp = await request_ins_dyinfo_batch(list(eq_datas.keys()))
 
@@ -481,15 +462,11 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
             # 获取到指定设备的属性信息
             eq_code_props = classify_props.get(eq_code, []) or []
             # 设备实例码对应的设备模型名称
-            eq_code_map_model_name = (
-                eq_ins_code_model_name.get(eq_code, "") or ""
-            )
-            _inspect_contents: List[PropertyModel] = []
-
+            eq_code_map_model_name = eq_ins_code_model_name.get(eq_code, "") or ""
             new_inspect_contents: List[PropertyModel] = []
             # 通过设备实例码获取设备模型名称对应的属性名称列表
-            current_eq_code_param_props: List[str] = (
-                model_name_mcp_props_name.get(eq_code_map_model_name, [])
+            current_eq_code_param_props: List[str] = cast(
+                List[str], model_name_mcp_props_name.get(eq_code_map_model_name, [])
             )
             for param_prop_name in current_eq_code_param_props:
                 _p = PropertyModel(dataCode="", propName=param_prop_name)
