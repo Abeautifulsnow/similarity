@@ -119,9 +119,7 @@ async def request_dt(
         ValueError: If the DT_URL environment variable is not set.
     """
 
-    base_url = (
-        os.getenv("DT_URL", args.url) or "http://112.126.99.154:8823/bk/siact-sec-api"
-    )
+    base_url = os.getenv("DT_URL", args.url) or "http://112.126.99.154:8823/bk/siact-sec-api"
     if not base_url:
         raise ValueError("DT_URL environment variable not set")
 
@@ -211,30 +209,22 @@ async def get_model_tree_by_project_model_code(
     return await request_dt(route, method=method, data=data, params=params)
 
 
-def recursive_find_model_code(
-    model_tree: List[Dict], model_name: str, model_type: str = "eq"
-) -> List[str]:
+def recursive_find_model_code(model_tree: List[Dict], model_name: str, model_type: str = "eq") -> List[str]:
     """递归查找设备模型码"""
 
     results: List[str] = []
 
     for node in model_tree:
-        if node.get("nodeType") == model_type and model_name in (
-            node.get("modelName", "") or ""
-        ):
+        if node.get("nodeType") == model_type and model_name in (node.get("modelName", "") or ""):
             results.append(node.get("dataCode", ""))
         else:
             if children := node.get("children"):
-                results.extend(
-                    recursive_find_model_code(children, model_name, model_type)
-                )
+                results.extend(recursive_find_model_code(children, model_name, model_type))
 
     return results
 
 
-async def get_eq_model_code(
-    project_model_code: str, eq_name: str
-) -> Dict[str, List[str]]:
+async def get_eq_model_code(project_model_code: str, eq_name: str) -> Dict[str, List[str]]:
     """获取设备模型码"""
 
     resp = await get_model_tree_by_project_model_code(project_model_code)
@@ -251,9 +241,7 @@ def filter_dict(data: Dict | List, keys: List[str]) -> Dict | List:
     """过滤字典中的键"""
 
     if isinstance(data, list):
-        return [
-            filter_dict(item, keys) if isinstance(item, dict) else item for item in data
-        ]
+        return [filter_dict(item, keys) if isinstance(item, dict) else item for item in data]
     else:
         return {k: v for k, v in data.items() if k not in keys}
 
@@ -301,9 +289,7 @@ async def get_instances_in_dt(
 
     results = await asyncio.gather(
         *[
-            get_eq_insCode_by_project_insCode_and_modelCode(
-                project_insCode, eq_model_code, eq_model_name
-            )
+            get_eq_insCode_by_project_insCode_and_modelCode(project_insCode, eq_model_code, eq_model_name)
             for eq_model_code, eq_model_name in eq_model_codes.items()
         ]
     )
@@ -314,59 +300,6 @@ async def get_instances_in_dt(
         for _res in results
         for eq_model_name, res in _res.items()
     ]
-
-
-# @mcp.tool(name="get_dynamic_prop_list")
-# async def get_dynamic_prop_list(
-#     dataCodes: List[str] = Field(description="设备实例的数字化编码列表"),
-# ) -> List[Dict | str]:
-#     """获取`设备`动态属性列表.
-
-#     Args:
-#         dataCodes (List[str]): 设备实例的数字化编码列表, **必填**.
-
-#     Returns:
-#         List[Dict | str]: 动态属性列表的数据或错误消息.
-#     """
-
-#     route = "/v1/ins/eq/page/dynamic"
-
-#     def _compose_data_code_params(_dataCodes: List[str]) -> List[Dict]:
-#         _data: Dict = {
-#             "propTypes": [],
-#             "propCode": None,
-#             "propName": None,
-#             "pageNumber": 1,
-#             "pageSize": 500,
-#         }
-#         return [{**_data, "dataCode": dataCode} for dataCode in _dataCodes]
-
-#     data_params = _compose_data_code_params(dataCodes)
-
-#     async def handle_request(data: Dict) -> Dict | str:
-#         resp = await request_dt(route, method="POST", data=data, params={})
-
-#         if isinstance(resp, str):
-#             return {data["dataCode"]: resp}
-#         else:
-#             datas = resp["data"]["records"]
-
-#             new_datas = []
-#             for d in datas:
-#                 new_datas.append(
-#                     {
-#                         "dataCode": d["dataCode"],
-#                         "propName": d["propName"],
-#                     }
-#                 )
-
-#             return {data["dataCode"]: new_datas}
-
-#     results = await asyncio.gather(
-#         *[handle_request(data) for data in data_params]
-#     )
-
-#     return results
 
 
 async def request_ins_dyinfo_batch(ins_data_codes: List[str]) -> Dict | str:
@@ -503,9 +436,7 @@ async def query_realtime_data_batch_by_dynamic(
     """
 
     route = "/prop/dy/rt/fm"
-    response = await request_dt(
-        route, method="POST", params={}, data=data_codes, timeout=30
-    )
+    response = await request_dt(route, method="POST", params={}, data=data_codes, timeout=30)
 
     if isinstance(response, dict):
         data = response.get("data", [])
@@ -529,11 +460,7 @@ def entry():
     """The main entry point for the digital twin server."""
 
     try:
-        logger.info(
-            "[Smart Patrol Inspection] server started with transport: {}!".format(
-                args.transport
-            )
-        )
+        logger.info("[Smart Patrol Inspection] server started with transport: {}!".format(args.transport))
         mcp.run(transport=args.transport)
     except Exception as e:
         logger.error(e)
