@@ -226,16 +226,14 @@ def recursive_find_model_code(
     results: List[str] = []
 
     for node in model_tree:
-        if node.get("nodeType") == model_type and model_name in node.get(
-            "modelName", ""
+        if node.get("nodeType") == model_type and model_name in (
+            node.get("modelName", "") or ""
         ):
             results.append(node.get("dataCode", ""))
         else:
-            if node.get("children"):
+            if children := node.get("children"):
                 results.extend(
-                    recursive_find_model_code(
-                        node.get("children", []), model_name, model_type
-                    )
+                    recursive_find_model_code(children, model_name, model_type)
                 )
 
     return results
@@ -295,8 +293,8 @@ async def get_instances_in_dt(
     project_model_code: str = ""
     for project in data:
         if project["proName"] == project_name:
-            project_insCode = project.get("dataCode", "")
-            project_model_code = project.get("modelDataCode", "")
+            project_insCode = project.get("dataCode", "") or ""
+            project_model_code = project.get("modelDataCode", "") or ""
             break
 
     # 并发获取项目下所有设备实例的insCode, 需要解构
@@ -458,19 +456,20 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
     if isinstance(prop_resp, str):
         return prop_resp
     elif isinstance(prop_resp, dict):
-        datas: List[Dict] = prop_resp.get("data", [])
         # 将结果按照设备实例码进行归类
         classify_props: Dict[str, List[PropertyModel]] = defaultdict(list)
-        for data in datas:
-            if single_datas := data.get("dynamicProperties", []):
-                for s_d in single_datas:
-                    if ins_code := s_d.get("insDataCode"):
-                        classify_props[ins_code].append(
-                            {
-                                "dataCode": s_d["dataCode"],
-                                "propName": s_d["propName"],
-                            }
-                        )
+        # 防止data为None
+        if datas := prop_resp.get("data", []):
+            for data in datas:
+                if single_datas := data.get("dynamicProperties", []):
+                    for s_d in single_datas:
+                        if ins_code := s_d.get("insDataCode"):
+                            classify_props[ins_code].append(
+                                {
+                                    "dataCode": s_d["dataCode"],
+                                    "propName": s_d["propName"],
+                                }
+                            )
 
         # 归类模型名称和属性名称
         model_name_mcp_props_name = {}
@@ -480,9 +479,11 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
         new_datas: List[AgentInspectModel] = []
         for eq_code, eq_name in eq_datas.items():
             # 获取到指定设备的属性信息
-            eq_code_props = classify_props.get(eq_code, [])
+            eq_code_props = classify_props.get(eq_code, []) or []
             # 设备实例码对应的设备模型名称
-            eq_code_map_model_name = eq_ins_code_model_name.get(eq_code, "")
+            eq_code_map_model_name = (
+                eq_ins_code_model_name.get(eq_code, "") or ""
+            )
             _inspect_contents: List[PropertyModel] = []
 
             new_inspect_contents: List[PropertyModel] = []
