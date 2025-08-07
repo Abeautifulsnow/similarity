@@ -140,6 +140,7 @@ async def request_dt(
 
             if int(response.status_code) == 200:
                 resp = response.json()
+                logger.debug(f"[Response Data] ==> {resp}")
                 return resp
             else:
                 return f"Error: The route {route} not found."
