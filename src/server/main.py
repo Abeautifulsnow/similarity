@@ -440,6 +440,7 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
     )
 
     eq_datas: Dict[str, str] = {}
+    # 归类设备实例名称和模型名称
     eq_ins_code_model_name: Dict[str, str] = {}
     for ins in instances:
         for eq_model_name, _ins in ins.items():
@@ -458,6 +459,7 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
         return prop_resp
     elif isinstance(prop_resp, dict):
         datas: List[Dict] = prop_resp.get("data", [])
+        # 将结果按照设备实例码进行归类
         classify_props: Dict[str, List[PropertyModel]] = defaultdict(list)
         for data in datas:
             if single_datas := data.get("dynamicProperties", []):
