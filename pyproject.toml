@@ -11,6 +11,14 @@ dependencies = [
     "mcp>=1.12.3",
 ]
 
+[project.optional-dependencies]
+rust = [
+    "maturin>=1.9.3",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+concurrent-installs = 4

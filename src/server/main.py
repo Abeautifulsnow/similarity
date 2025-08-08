@@ -216,6 +216,7 @@ def recursive_find_model_code(model_tree: List[Dict], model_name: str, model_typ
     results: List[str] = []
 
     for node in model_tree:
+        # 判断modelName在节点中
         if node.get("nodeType") == model_type and model_name in (node.get("modelName", "") or ""):
             results.append(node.get("dataCode", ""))
         else:
@@ -271,6 +272,7 @@ async def get_instances_in_dt(
     project_insCode: str = ""
     project_model_code: str = ""
     for project in data:
+        # 判断项目名称是否匹配. TODO: 需要替换为近似方法
         if project["proName"] == project_name:
             project_insCode = project.get("dataCode", "") or ""
             project_model_code = project.get("modelDataCode", "") or ""
