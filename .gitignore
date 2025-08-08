@@ -1,0 +1,8 @@
+tests
+docs
+test_*.py
+*.pyc
+*.pyo
+*.pyd
+.idea
+target
