@@ -1,12 +1,24 @@
 use ahash::RandomState;
 use ahash::{AHashMap, AHashSet};
 use jieba_rs::Jieba;
+use lazy_static::lazy_static;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rapidfuzz::distance::levenshtein;
 use regex::Regex;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
+
+lazy_static! {
+    static ref REMOVE_BRACKETS_RE: Regex = Regex::new(r"[(\[（【].*?[)\]）】]").unwrap();
+    static ref NON_WORD_RE: Regex = Regex::new(r"[^\p{Script=Han}\p{L}\p{N}]+").unwrap();
+    static ref LEADING_NUM_RE: Regex = Regex::new(r"^(?:no\.?|NO\.?\s*)?[#\-]*\d+[#\-]*").unwrap();
+    static ref STOPWORDS: AHashSet<String> =
+        ["的", "号", "编号"].iter().map(|s| s.to_string()).collect();
+    static ref GLOBAL_JIEBA: Jieba = Jieba::new();
+    static ref HASHER_BUILDER: RandomState = RandomState::with_seeds(1, 2, 3, 4);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimType {
@@ -22,7 +34,7 @@ pub struct TextSimilarity {
     remove_brackets_re: Regex,
     non_word_re: Regex,
     leading_num_re: Regex,
-    stopwords: Vec<String>,
+    stopwords: AHashSet<String>,
     hasher_builder: RandomState,
 }
 
@@ -39,18 +51,13 @@ impl TextSimilarity {
 
         Ok(TextSimilarity {
             method,
-            jieba: Jieba::new(),
-            remove_brackets_re: Regex::new(r"[(\[（【].*?[)\]）】]").unwrap(),
-            non_word_re: Regex::new(r"[^\p{Script=Han}\p{L}\p{N}]+").unwrap(),
-            leading_num_re: Regex::new(r"^(?:no\.?|NO\.?\s*)?[#\-]*\d+[#\-]*").unwrap(),
-            stopwords: vec![
-                "的".to_string(),
-                "号".to_string(),
-                "编号".to_string(),
-                "unit".to_string(),
-            ],
+            jieba: GLOBAL_JIEBA.clone(),
+            remove_brackets_re: REMOVE_BRACKETS_RE.clone(),
+            non_word_re: NON_WORD_RE.clone(),
+            leading_num_re: LEADING_NUM_RE.clone(),
+            stopwords: STOPWORDS.clone(),
             // 固定种子保证哈希稳定性
-            hasher_builder: RandomState::with_seeds(1, 2, 3, 4),
+            hasher_builder: HASHER_BUILDER.clone(),
         })
     }
 
@@ -62,22 +69,49 @@ impl TextSimilarity {
             return Ok(1.0);
         }
 
-        // 分词缓存
-        let token_vec1 = self.tokenize(&n1);
-        let token_vec2 = self.tokenize(&n2);
-
-        let token_sim = match self.method {
-            SimType::Levenshtein => self.levenshtein_similarity(&n1, &n2),
-            SimType::Jaccard => self.jaccard_similarity_tokens(&token_vec1, &token_vec2),
-            SimType::Simhash => self.simhash_similarity_tokens(&token_vec1, &token_vec2),
-        };
+        let char_now = Instant::now();
         let char_sim = match self.method {
-            SimType::Levenshtein => token_sim,
+            SimType::Levenshtein => self.levenshtein_similarity(&n1, &n2),
             SimType::Jaccard => self.jaccard_similarity_chars(&n1, &n2),
             SimType::Simhash => self.simhash_similarity_chars(&n1, &n2),
         };
 
+        let char_elapsed = char_now.elapsed();
+        println!("Char time elapsed: {char_elapsed:?}");
+
+        // 分词缓存
+        let token_now = Instant::now();
+        let token_vec1 = self.tokenize(&n1);
+        let token_vec2 = self.tokenize(&n2);
+        let token_sim = match self.method {
+            SimType::Levenshtein => char_sim,
+            SimType::Jaccard => self.jaccard_similarity_tokens(&token_vec1, &token_vec2),
+            SimType::Simhash => self.simhash_similarity_tokens(&token_vec1, &token_vec2),
+        };
+        let token_elapsed = token_now.elapsed();
+        println!("Token time elapsed: {token_elapsed:?}");
+
         Ok(token_sim.max(char_sim))
+    }
+
+    fn calculate_simple(&self, s1: &str, s2: &str) -> PyResult<f64> {
+        let n1 = self.normalize(s1);
+        let n2 = self.normalize(s2);
+
+        if n1.is_empty() && n2.is_empty() {
+            return Ok(1.0);
+        }
+
+        let char_now = Instant::now();
+        let char_sim = match self.method {
+            SimType::Levenshtein => self.levenshtein_similarity(&n1, &n2),
+            SimType::Jaccard => self.jaccard_similarity_chars(&n1, &n2),
+            SimType::Simhash => self.simhash_similarity_chars(&n1, &n2),
+        };
+
+        let char_elapsed = char_now.elapsed();
+        println!("Char time elapsed: {char_elapsed:?}");
+        Ok(char_sim)
     }
 
     fn batch_calculate(&self, pairs: Vec<(String, String)>) -> PyResult<Vec<f64>> {
@@ -87,18 +121,31 @@ impl TextSimilarity {
         }
         Ok(results)
     }
+
+    fn batch_calculate_simple(&self, pairs: Vec<(String, String)>) -> PyResult<Vec<f64>> {
+        let mut results = Vec::with_capacity(pairs.len());
+        for (a, b) in pairs.into_iter() {
+            results.push(self.calculate_simple(&a, &b)?);
+        }
+        Ok(results)
+    }
 }
 
 impl TextSimilarity {
     fn normalize(&self, s: &str) -> String {
-        let mut t = s.nfkc().collect::<String>();
+        // 预分配足够容量，减少动态扩容
+        let mut t = String::with_capacity(s.len());
+        // 直接在同一个字符串中完成NFKC归一化
+        t.extend(s.nfkc());
+
+        // 合并括号和非文字字符替换（用一次replace_all处理多个模式）
         t = self.remove_brackets_re.replace_all(&t, "").into_owned();
         t = self.leading_num_re.replace(&t, "").into_owned();
+        // 非文字字符替换为空格（后续可直接split_whitespace）
         t = self.non_word_re.replace_all(&t, " ").into_owned();
 
         // collapse spaces and trim first, 再做停用词去除会更准
         let collapsed = t.split_whitespace().collect::<Vec<&str>>().join(" ");
-
         // 利用分词过滤停用词，避免多次replace
         let tokens = self.tokenize(&collapsed);
 
@@ -119,12 +166,22 @@ impl TextSimilarity {
         if s.is_empty() {
             return Vec::new();
         }
-        self.jieba
-            .cut(s, false)
-            .into_iter()
-            .map(|x| x.trim().to_string())
-            .filter(|x| !x.is_empty() && !self.stopwords.contains(x))
-            .collect()
+
+        // 对短文本直接按字符分割（跳过Jieba）
+        if s.len() < 6 {
+            s.chars()
+                .map(|c| c.to_string())
+                .filter(|x| !x.is_empty() && !self.stopwords.contains(x))
+                .collect()
+        } else {
+            // 长文本仍用Jieba
+            self.jieba
+                .cut(s, false)
+                .into_iter()
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty() && !self.stopwords.contains(x))
+                .collect()
+        }
     }
 
     fn jaccard_similarity_tokens(&self, tokens1: &[String], tokens2: &[String]) -> f64 {
@@ -216,6 +273,9 @@ impl TextSimilarity {
 
 #[cfg(test)]
 mod tests {
+    // cargo test -r test_simhash_similarity -- --show-output
+    use std::time::Instant;
+
     use super::*;
 
     #[test]
@@ -267,18 +327,52 @@ mod tests {
 
     #[test]
     fn test_simhash_similarity() {
+        let init_now = Instant::now();
         let ts = TextSimilarity::new("simhash").unwrap();
+        println!("Simhash init cost: {:?}", init_now.elapsed());
+
+        let now = Instant::now();
         let s1 = "冷却塔";
         let s2 = "4#冷却塔（ACLQ1-1-1）";
         let sim = ts.calculate(s1, s2).unwrap();
         println!("simhash sim: {sim}");
         assert!(sim > 0.8); // SimHash 对相似文本判定较高
+        let elapsed = now.elapsed();
+        println!("simhash elapsed: {:?}", elapsed);
 
+        let now1 = Instant::now();
         let s3 = "冷却塔1";
         let s4 = "4#冷却塔（ACLQ1-1-1）";
         let sim1 = ts.calculate(s3, s4).unwrap();
         println!("simhash sim1: {sim1}");
         assert!(sim1 > 0.7);
+        let elapsed1 = now1.elapsed();
+        println!("simhash1 elapsed: {:?}", elapsed1);
+    }
+
+    #[test]
+    fn test_simhash_similarity_simple() {
+        let init_now = Instant::now();
+        let ts = TextSimilarity::new("simhash").unwrap();
+        println!("Simhash init cost: {:?}", init_now.elapsed());
+
+        let now = Instant::now();
+        let s1 = "冷却塔";
+        let s2 = "4#冷却塔（ACLQ1-1-1）";
+        let sim = ts.calculate_simple(s1, s2).unwrap();
+        println!("simhash sim: {sim}");
+        assert!(sim > 0.8); // SimHash 对相似文本判定较高
+        let elapsed = now.elapsed();
+        println!("simhash simple elapsed: {:?}", elapsed);
+
+        let now1 = Instant::now();
+        let s3 = "冷却塔1";
+        let s4 = "4#冷却塔（ACLQ1-1-1）";
+        let sim1 = ts.calculate_simple(s3, s4).unwrap();
+        println!("simhash sim1: {sim1}");
+        assert!(sim1 > 0.7);
+        let elapsed1 = now1.elapsed();
+        println!("simhash1 simple elapsed: {:?}", elapsed1);
     }
 
     #[test]

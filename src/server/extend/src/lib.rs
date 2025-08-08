@@ -1,4 +1,5 @@
 mod calculate;
+mod calculate_chars;
 
 use calculate::TextSimilarity;
 
