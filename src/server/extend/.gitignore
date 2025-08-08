@@ -5,9 +5,6 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 
-# C extensions
-*.so
-
 # Distribution / packaging
 .Python
 .venv/
