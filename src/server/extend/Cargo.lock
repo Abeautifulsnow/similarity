@@ -438,7 +438,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "similarity_calcute"
+name = "similarity_calculate"
 version = "0.0.1"
 dependencies = [
  "ahash",
