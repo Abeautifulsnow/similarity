@@ -11,7 +11,6 @@ crate-type = ["cdylib"]
 [dependencies]
 ahash = "0.8.12"
 jieba-rs = "0.8.0"
-lazy_static = "1.5.0"
 pyo3 = "0.25.1"
 rapidfuzz = "0.5.0"
 regex = { version = "1.11.1", features = ["unicode", "unicode-perl"] }
@@ -29,3 +28,14 @@ opt-level = 3
 
 [package.metadata.maturin]
 name = "similarity_calculate"
+
+[workspace]
+members = [
+    "./",
+]
+
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
+cast_precision_loss = "allow"

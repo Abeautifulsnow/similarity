@@ -3,8 +3,11 @@ import asyncio
 import logging
 import os
 from collections import defaultdict
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import (
     Any,
+    AsyncIterator,
     Dict,
     Generic,
     List,
@@ -17,9 +20,12 @@ from typing import (
 import httpx
 
 # import uvicorn
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.session import ServerSession
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
+
+from server.extend.similarity_calculate import TextSimilarity
 
 parser = argparse.ArgumentParser(description="Smart Patrol Inspection MCP Server")
 parser.add_argument(
@@ -56,6 +62,13 @@ parser.add_argument(
     action="store_true",
     help="Output the result in JSON format. Default: `%(default)s`",
 )
+parser.add_argument(
+    "-c",
+    "--confidence",
+    type=float,
+    default=0.7,
+    help="Confidence for the two strings' similarity. Default: `%(default)s`",
+)
 args = parser.parse_args()
 
 # Compatible with the abbreviated form of streamble-http - http
@@ -74,6 +87,21 @@ logging.basicConfig(
 logger = logging.getLogger("[SmartPatrolInspectionServer]")
 
 
+@dataclass
+class AppContext:
+    """Application context with typed dependencies."""
+
+    text_sim: TextSimilarity
+
+
+@asynccontextmanager
+async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+    try:
+        yield AppContext(text_sim=TextSimilarity("simhash"))
+    finally:
+        pass
+
+
 mcp = FastMCP(
     name="smart patrol inspection",
     instructions="Digital twin integration through Model Context Protocol for smart patrol inspection.",
@@ -81,6 +109,7 @@ mcp = FastMCP(
     host="0.0.0.0",
     stateless_http=True if transport_is_http else False,
     json_response=args.json,
+    lifespan=app_lifespan,
 )
 
 T = TypeVar("T")
@@ -210,23 +239,43 @@ async def get_model_tree_by_project_model_code(
     return await request_dt(route, method=method, data=data, params=params)
 
 
-def recursive_find_model_code(model_tree: List[Dict], model_name: str, model_type: str = "eq") -> List[str]:
+def check_string_similarity(text_sim_cls: TextSimilarity, text1: str, text2: str) -> bool:
+    """检查字符串相似度"""
+
+    sim_score = text_sim_cls.calculate(text1, text2)
+    logger.debug(f"String similarity score: {sim_score} between {text1} and {text2}")
+    return sim_score > args.confidence
+
+
+def recursive_find_model_code(
+    text_sim_cls: TextSimilarity, model_tree: List[Dict], model_name: str, model_type: str = "eq"
+) -> List[str]:
     """递归查找设备模型码"""
 
     results: List[str] = []
 
     for node in model_tree:
         # 判断modelName在节点中
-        if node.get("nodeType") == model_type and model_name in (node.get("modelName", "") or ""):
+        # TODO: 增加相似度判断
+        model_name_include = False
+        # 判断模型名称是否为空
+        if node_model_name := node.get("modelName", ""):
+            model_name_include = (model_name in node_model_name) or check_string_similarity(
+                text_sim_cls, model_name, node_model_name
+            )
+
+        if node.get("nodeType") == model_type and model_name_include:
             results.append(node.get("dataCode", ""))
         else:
             if children := node.get("children"):
-                results.extend(recursive_find_model_code(children, model_name, model_type))
+                results.extend(recursive_find_model_code(text_sim_cls, children, model_name, model_type))
 
     return results
 
 
-async def get_eq_model_code(project_model_code: str, eq_name: str) -> Dict[str, List[str]]:
+async def get_eq_model_code(
+    text_sim_cls: TextSimilarity, project_model_code: str, eq_name: str
+) -> Dict[str, List[str]]:
     """获取设备模型码"""
 
     resp = await get_model_tree_by_project_model_code(project_model_code)
@@ -236,7 +285,7 @@ async def get_eq_model_code(project_model_code: str, eq_name: str) -> Dict[str, 
     model_tree = resp.get("data", [])
 
     # 通过"nodeType": "eq"和"modelName": "xxx"来一起匹配
-    return {eq_name: recursive_find_model_code(model_tree, eq_name)}
+    return {eq_name: recursive_find_model_code(text_sim_cls, model_tree, eq_name)}
 
 
 def filter_dict(data: Dict | List, keys: List[str]) -> Dict | List:
@@ -248,8 +297,8 @@ def filter_dict(data: Dict | List, keys: List[str]) -> Dict | List:
         return {k: v for k, v in data.items() if k not in keys}
 
 
-# @mcp.tool(name="get_instances_by_model_code")
 async def get_instances_in_dt(
+    text_sim_cls: TextSimilarity,
     project_name: str = Field(description="项目名称"),
     model_names: List[str] = Field(description="[系统/站/单元/设备]类别名称列表"),
 ):
@@ -273,13 +322,15 @@ async def get_instances_in_dt(
     project_model_code: str = ""
     for project in data:
         # 判断项目名称是否匹配. TODO: 需要替换为近似方法
-        if project["proName"] == project_name:
+        if project["proName"] == project_name or check_string_similarity(
+            text_sim_cls, project["proName"], project_name
+        ):
             project_insCode = project.get("dataCode", "") or ""
             project_model_code = project.get("modelDataCode", "") or ""
             break
 
     # 并发获取项目下所有设备实例的insCode, 需要解构
-    tasks = [get_eq_model_code(project_model_code, eq_name) for eq_name in model_names]
+    tasks = [get_eq_model_code(text_sim_cls, project_model_code, eq_name) for eq_name in model_names]
     # [{模型名称: [模型码1, 模型码2, ...]}]
     eq_name_model_codes_ = await asyncio.gather(*tasks)
     # 对模型码进行去重
@@ -328,6 +379,7 @@ class AgentInspectModel(TypedDict):
 
 @mcp.tool("get_inspect_contents_by_project_and_eq_model_code_and_prop_names")
 async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
+    ctx: Context[ServerSession, AppContext, Any],
     project_name: str = Field(description="项目名称"),
     eq_props_names: List[Dict[Literal["name", "props"], str | List[str]]] = Field(
         description="设备名称列表和属性列表",
@@ -347,9 +399,12 @@ async def get_inspect_contents_by_project_and_eq_model_code_and_prop_names(
     # {eq_code: [eq_props1, ...]}
     # 关联设备模型名称与模型实例码
     model_names = cast(List[str], [e["name"] for e in eq_props_names])
+    # 获取TextSimilarity类实例
+
+    text_similarity_cls = ctx.request_context.lifespan_context.text_sim
     instances = cast(
         List[Dict[str, List[Dict[str, str]] | Dict]],
-        await get_instances_in_dt(project_name, model_names),
+        await get_instances_in_dt(text_similarity_cls, project_name, model_names),
     )
 
     eq_datas: Dict[str, str] = {}

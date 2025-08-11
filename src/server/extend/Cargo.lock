@@ -443,7 +443,6 @@ version = "0.0.1"
 dependencies = [
  "ahash",
  "jieba-rs",
- "lazy_static",
  "pyo3",
  "rapidfuzz",
  "regex",

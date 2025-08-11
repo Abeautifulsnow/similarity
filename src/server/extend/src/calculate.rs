@@ -1,24 +1,32 @@
-use ahash::RandomState;
-use ahash::{AHashMap, AHashSet};
+use ahash::{AHashMap, AHashSet, RandomState};
 use jieba_rs::Jieba;
-use lazy_static::lazy_static;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rapidfuzz::distance::levenshtein;
 use regex::Regex;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::sync::LazyLock;
 use std::time::Instant;
+use std::string::ToString;
 use unicode_normalization::UnicodeNormalization;
 
-lazy_static! {
-    static ref REMOVE_BRACKETS_RE: Regex = Regex::new(r"[(\[（【].*?[)\]）】]").unwrap();
-    static ref NON_WORD_RE: Regex = Regex::new(r"[^\p{Script=Han}\p{L}\p{N}]+").unwrap();
-    static ref LEADING_NUM_RE: Regex = Regex::new(r"^(?:no\.?|NO\.?\s*)?[#\-]*\d+[#\-]*").unwrap();
-    static ref STOPWORDS: AHashSet<String> =
-        ["的", "号", "编号"].iter().map(|s| s.to_string()).collect();
-    static ref GLOBAL_JIEBA: Jieba = Jieba::new();
-    static ref HASHER_BUILDER: RandomState = RandomState::with_seeds(1, 2, 3, 4);
-}
+// 定义哈希种子
+const SEED1: u64 = 0xc3ab_a7e8_c40b_5426;
+const SEED2: u64 = 0xd2e6_f1a7_b8c9_d0e1;
+const SEED3: u64 = 0x1a2b_3c4d_5e6f_7a8b;
+const SEED4: u64 = 0x9c8d_7e6f_5a4b_3c2d;
+
+static REMOVE_BRACKETS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[(\[（【][^)\]）】]*[)\]）】]").unwrap());
+static NON_WORD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[^\p{Script=Han}\p{L}\p{N}]+").unwrap());
+static LEADING_NUM_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:no\.?|NO\.?\s*)?[#\-]*\d+[#\-]*").unwrap());
+static STOPWORDS: LazyLock<AHashSet<String>> =
+    LazyLock::new(|| ["的", "号", "编号"].iter().map(ToString::to_string).collect());
+static GLOBAL_JIEBA: LazyLock<Jieba> = LazyLock::new(Jieba::new);
+static HASHER_BUILDER: LazyLock<RandomState> =
+    LazyLock::new(|| RandomState::with_seeds(SEED1, SEED2, SEED3, SEED4));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimType {
@@ -61,26 +69,32 @@ impl TextSimilarity {
         })
     }
 
-    fn calculate(&self, s1: &str, s2: &str) -> PyResult<f64> {
+    fn select_char(&self, n1: &str, n2: &str) -> f64 {
+        match self.method {
+            SimType::Levenshtein => self.levenshtein_similarity(n1, n2),
+            SimType::Jaccard => self.jaccard_similarity_chars(n1, n2),
+            SimType::Simhash => self.simhash_similarity_chars(n1, n2),
+        }
+    }
+
+    fn calculate(&self, s1: &str, s2: &str) -> f64 {
+        // 归一化 - 文本预处理(去除停用词), 生成最终用于比较的标准化文本
         let n1 = self.normalize(s1);
         let n2 = self.normalize(s2);
 
         if n1.is_empty() && n2.is_empty() {
-            return Ok(1.0);
+            return 1.0;
         }
 
         let char_now = Instant::now();
-        let char_sim = match self.method {
-            SimType::Levenshtein => self.levenshtein_similarity(&n1, &n2),
-            SimType::Jaccard => self.jaccard_similarity_chars(&n1, &n2),
-            SimType::Simhash => self.simhash_similarity_chars(&n1, &n2),
-        };
+        let char_sim = self.select_char(&n1, &n2);
 
         let char_elapsed = char_now.elapsed();
         println!("Char time elapsed: {char_elapsed:?}");
 
         // 分词缓存
         let token_now = Instant::now();
+        // 这里是为了获取分词结果, 用于后续的基于词汇的相似度计算
         let token_vec1 = self.tokenize(&n1);
         let token_vec2 = self.tokenize(&n2);
         let token_sim = match self.method {
@@ -91,43 +105,39 @@ impl TextSimilarity {
         let token_elapsed = token_now.elapsed();
         println!("Token time elapsed: {token_elapsed:?}");
 
-        Ok(token_sim.max(char_sim))
+        token_sim.max(char_sim)
     }
 
-    fn calculate_simple(&self, s1: &str, s2: &str) -> PyResult<f64> {
+    fn calculate_simple(&self, s1: &str, s2: &str) -> f64 {
         let n1 = self.normalize(s1);
         let n2 = self.normalize(s2);
 
         if n1.is_empty() && n2.is_empty() {
-            return Ok(1.0);
+            return 1.0;
         }
 
         let char_now = Instant::now();
-        let char_sim = match self.method {
-            SimType::Levenshtein => self.levenshtein_similarity(&n1, &n2),
-            SimType::Jaccard => self.jaccard_similarity_chars(&n1, &n2),
-            SimType::Simhash => self.simhash_similarity_chars(&n1, &n2),
-        };
+        let char_sim = self.select_char(&n1, &n2);
 
         let char_elapsed = char_now.elapsed();
         println!("Char time elapsed: {char_elapsed:?}");
-        Ok(char_sim)
+        char_sim
     }
 
-    fn batch_calculate(&self, pairs: Vec<(String, String)>) -> PyResult<Vec<f64>> {
+    fn batch_calculate(&self, pairs: Vec<(String, String)>) -> Vec<f64> {
         let mut results = Vec::with_capacity(pairs.len());
-        for (a, b) in pairs.into_iter() {
-            results.push(self.calculate(&a, &b)?);
+        for (a, b) in pairs {
+            results.push(self.calculate(&a, &b));
         }
-        Ok(results)
+        results
     }
 
-    fn batch_calculate_simple(&self, pairs: Vec<(String, String)>) -> PyResult<Vec<f64>> {
+    fn batch_calculate_simple(&self, pairs: Vec<(String, String)>) -> Vec<f64> {
         let mut results = Vec::with_capacity(pairs.len());
-        for (a, b) in pairs.into_iter() {
-            results.push(self.calculate_simple(&a, &b)?);
+        for (a, b) in pairs {
+            results.push(self.calculate_simple(&a, &b));
         }
-        Ok(results)
+        results
     }
 }
 
@@ -154,22 +164,25 @@ impl TextSimilarity {
 
     fn levenshtein_similarity(&self, s1: &str, s2: &str) -> f64 {
         let dist = levenshtein::distance(s1.chars(), s2.chars());
-        let max_len = s1.chars().count().max(s2.chars().count()) as f64;
-        if max_len == 0.0 {
+        let max_len = s1.chars().count().max(s2.chars().count());
+        let max_len_f = max_len as f64;
+        if max_len_f == 0.0 {
             1.0
         } else {
-            1.0 - (dist as f64 / max_len)
+            1.0 - (dist as f64 / max_len_f)
         }
     }
 
     fn tokenize(&self, s: &str) -> Vec<String> {
         if s.is_empty() {
-            return Vec::new();
+            return Vec::<String>::new();
         }
 
+        let chars: Vec<char> = s.chars().collect::<Vec<char>>();
         // 对短文本直接按字符分割（跳过Jieba）
-        if s.len() < 6 {
-            s.chars()
+        if chars.len() < 10 {
+            chars
+                .into_iter()
                 .map(|c| c.to_string())
                 .filter(|x| !x.is_empty() && !self.stopwords.contains(x))
                 .collect()
@@ -189,8 +202,8 @@ impl TextSimilarity {
             return 1.0;
         }
 
-        let set1: AHashSet<_> = tokens1.into_iter().collect();
-        let set2: AHashSet<_> = tokens2.into_iter().collect();
+        let set1: AHashSet<_> = tokens1.iter().collect();
+        let set2: AHashSet<_> = tokens2.iter().collect();
 
         let inter = set1.intersection(&set2).count() as f64;
         let uni = set1.union(&set2).count() as f64;
@@ -198,7 +211,7 @@ impl TextSimilarity {
         if uni == 0.0 {
             0.0
         } else {
-            (inter / uni).max(0.0).min(1.0)
+            (inter / uni).clamp(0.0, 1.0)
         }
     }
 
@@ -216,7 +229,7 @@ impl TextSimilarity {
         }
     }
 
-    /// 字符集 SimHash 相似度
+    /// 字符集 `SimHash` 相似度
     fn simhash_similarity_chars(&self, s1: &str, s2: &str) -> f64 {
         let tokens1: Vec<String> = s1.chars().map(|c| c.to_string()).collect();
         let tokens2: Vec<String> = s2.chars().map(|c| c.to_string()).collect();
@@ -224,15 +237,15 @@ impl TextSimilarity {
         let h1 = self.simhash_tokens(&tokens1);
         let h2 = self.simhash_tokens(&tokens2);
 
-        let xor = (h1 ^ h2).count_ones() as f64;
+        let xor = f64::from((h1 ^ h2).count_ones());
         1.0 - (xor / 64.0)
     }
 
     fn simhash_similarity_tokens(&self, tokens1: &[String], tokens2: &[String]) -> f64 {
-        let h1 = self.simhash_tokens(&tokens1);
-        let h2 = self.simhash_tokens(&tokens2);
+        let h1 = self.simhash_tokens(tokens1);
+        let h2 = self.simhash_tokens(tokens2);
 
-        let xor = (h1 ^ h2).count_ones() as f64;
+        let xor = f64::from((h1 ^ h2).count_ones());
         1.0 - (xor / 64.0)
     }
 
@@ -243,11 +256,11 @@ impl TextSimilarity {
         }
 
         let mut freq: AHashMap<String, i32> = AHashMap::new();
-        for t in tokens.iter() {
+        for t in tokens {
             *freq.entry(t.clone()).or_insert(0) += 1;
         }
 
-        for (tok, w) in freq.into_iter() {
+        for (tok, w) in freq {
             let h = self.hash_str(&tok);
             for i in 0..64 {
                 let bit = ((h >> i) & 1) as i32;
@@ -271,6 +284,43 @@ impl TextSimilarity {
     }
 }
 
+#[allow(dead_code)]
+/// For compare with `TextSimilarity.simhash_similarity_chars`
+fn simhash_fp(s: &str) -> u64 {
+    let mut v = [0i32; 64];
+    for c in s.chars() {
+        let mut hasher = HASHER_BUILDER.build_hasher();
+        hasher.write_u32(c as u32);
+        let h = hasher.finish();
+
+        for i in 0..64 {
+            v[i] += if (h >> i) & 1 == 1 { 1 } else { -1 };
+        }
+    }
+
+    let mut fingerprint = 0u64;
+    for i in 0..64 {
+        if v[i] > 0 {
+            fingerprint |= 1 << i;
+        }
+    }
+    fingerprint
+}
+
+#[allow(dead_code)]
+/// For compare with TextSimilarity.simhash_similarity_chars
+fn simhash_similarity(s1: &str, s2: &str) -> f64 {
+    // NFKC 归一化
+    let s1_norm: String = s1.nfkc().collect();
+    let s2_norm: String = s2.nfkc().collect();
+
+    let fp1 = simhash_fp(&s1_norm);
+    let fp2 = simhash_fp(&s2_norm);
+
+    let xor = (fp1 ^ fp2).count_ones();
+    1.0 - f64::from(xor) / 64.0
+}
+
 #[cfg(test)]
 mod tests {
     // cargo test -r test_simhash_similarity -- --show-output
@@ -285,12 +335,12 @@ mod tests {
         let s = "4#冷却塔（ACLQ1-1-1）";
         let normalized = ts.normalize(s);
         println!("normalized: {normalized}");
-        assert_eq!(normalized, "冷却塔"); // 分词去除括号及编号后按空格分开的 token
+        assert_eq!(normalized, "冷 却 塔"); // 分词去除括号及编号后按空格分开的 token
 
         let s2 = "冷却的塔";
         let normalized2 = ts.normalize(s2);
         // "的" 是停用词，应该被去掉
-        assert_eq!(normalized2, "冷却 塔");
+        assert_eq!(normalized2, "冷 却 塔");
     }
 
     #[test]
@@ -298,13 +348,13 @@ mod tests {
         let ts = TextSimilarity::new("levenshtein").unwrap();
         let s1 = "冷却塔";
         let s2 = "冷却的塔";
-        let sim = ts.calculate(s1, s2).unwrap();
+        let sim = ts.calculate(s1, s2);
         println!("levenshtein sim: {sim}");
         assert!(sim > 0.7); // 相似度较高
 
         let s3 = "冷却塔1";
         let s4 = "4#冷却塔1（ACLQ1-1-1）";
-        let sim1 = ts.calculate(s3, s4).unwrap();
+        let sim1 = ts.calculate(s3, s4);
         println!("levenshtein sim1: {sim1}");
         assert!(sim1 > 0.7);
     }
@@ -314,13 +364,13 @@ mod tests {
         let ts = TextSimilarity::new("jaccard").unwrap();
         let s1 = "冷却塔1";
         let s2 = "冷却的塔";
-        let sim = ts.calculate(s1, s2).unwrap();
+        let sim = ts.calculate(s1, s2);
         println!("jaccard sim: {sim}");
         assert!(sim > 0.7); // Jaccard 认为两个集合重合度较高
 
         let s3 = "冷却塔1";
         let s4 = "4#冷却塔（ACLQ1-1-1）";
-        let sim1 = ts.calculate(s3, s4).unwrap();
+        let sim1 = ts.calculate(s3, s4);
         println!("jaccard sim1: {sim1}");
         assert!(sim1 >= 0.6);
     }
@@ -334,20 +384,20 @@ mod tests {
         let now = Instant::now();
         let s1 = "冷却塔";
         let s2 = "4#冷却塔（ACLQ1-1-1）";
-        let sim = ts.calculate(s1, s2).unwrap();
+        let sim = ts.calculate(s1, s2);
         println!("simhash sim: {sim}");
         assert!(sim > 0.8); // SimHash 对相似文本判定较高
         let elapsed = now.elapsed();
-        println!("simhash elapsed: {:?}", elapsed);
+        println!("simhash elapsed: {elapsed:?}");
 
         let now1 = Instant::now();
         let s3 = "冷却塔1";
         let s4 = "4#冷却塔（ACLQ1-1-1）";
-        let sim1 = ts.calculate(s3, s4).unwrap();
+        let sim1 = ts.calculate(s3, s4);
         println!("simhash sim1: {sim1}");
         assert!(sim1 > 0.7);
         let elapsed1 = now1.elapsed();
-        println!("simhash1 elapsed: {:?}", elapsed1);
+        println!("simhash1 elapsed: {elapsed1:?}");
     }
 
     #[test]
@@ -359,20 +409,20 @@ mod tests {
         let now = Instant::now();
         let s1 = "冷却塔";
         let s2 = "4#冷却塔（ACLQ1-1-1）";
-        let sim = ts.calculate_simple(s1, s2).unwrap();
+        let sim = ts.calculate_simple(s1, s2);
         println!("simhash sim: {sim}");
         assert!(sim > 0.8); // SimHash 对相似文本判定较高
         let elapsed = now.elapsed();
-        println!("simhash simple elapsed: {:?}", elapsed);
+        println!("simhash simple elapsed: {elapsed:?}");
 
         let now1 = Instant::now();
         let s3 = "冷却塔1";
         let s4 = "4#冷却塔（ACLQ1-1-1）";
-        let sim1 = ts.calculate_simple(s3, s4).unwrap();
+        let sim1 = ts.calculate_simple(s3, s4);
         println!("simhash sim1: {sim1}");
         assert!(sim1 > 0.7);
         let elapsed1 = now1.elapsed();
-        println!("simhash1 simple elapsed: {:?}", elapsed1);
+        println!("simhash1 simple elapsed: {elapsed1:?}");
     }
 
     #[test]
@@ -382,9 +432,32 @@ mod tests {
             ("冷却塔".to_string(), "冷却的塔".to_string()),
             ("设备编号1".to_string(), "设备编号2".to_string()),
         ];
-        let results = ts.batch_calculate(pairs).unwrap();
+        let results = ts.batch_calculate(pairs);
         assert_eq!(results.len(), 2);
         assert!(results[0] > 0.7);
         assert!(results[1] > 0.7);
+    }
+
+    #[test]
+    fn test_string_length() {
+        let s2 = "abcde";
+        let s3 = "冷却塔1";
+        let s4 = "4#冷却塔（ACLQ1-1-1）";
+        assert_eq!(s2.len(), s2.chars().count());
+        assert_eq!(s3.chars().count(), 4);
+        assert_eq!(s4.chars().count(), 16);
+    }
+
+    #[test]
+    fn test_simhash_fp() {
+        let s1 = "冷却塔1";
+        let s2 = "4#冷却塔（ACLQ1-1-1）";
+        let fp = simhash_similarity(s1, s2);
+        println!("simhash fp: {fp}");
+
+        // 测试 simhash 相似度. 该综合效果更好
+        let ts = TextSimilarity::new("simhash").unwrap();
+        let fp1 = ts.calculate(s1, s2);
+        println!("simhash fp1: {fp1}");
     }
 }
