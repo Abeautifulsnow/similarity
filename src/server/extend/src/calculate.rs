@@ -7,7 +7,6 @@ use regex::Regex;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::string::ToString;
 use std::sync::LazyLock;
-use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
 
 // 定义哈希种子
@@ -93,7 +92,6 @@ impl TextSimilarity {
         let char_sim = self.select_char(&n1, &n2);
 
         // 分词缓存
-        let token_now = Instant::now();
         // 这里是为了获取分词结果, 用于后续的基于词汇的相似度计算
         let token_vec1 = self.tokenize(&n1);
         let token_vec2 = self.tokenize(&n2);
@@ -102,8 +100,6 @@ impl TextSimilarity {
             SimType::Jaccard => self.jaccard_similarity_tokens(&token_vec1, &token_vec2),
             SimType::Simhash => self.simhash_similarity_tokens(&token_vec1, &token_vec2),
         };
-        let token_elapsed = token_now.elapsed();
-        println!("Token time elapsed: {token_elapsed:?}");
 
         token_sim.max(char_sim)
     }
