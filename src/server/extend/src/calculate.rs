@@ -5,9 +5,9 @@ use pyo3::prelude::*;
 use rapidfuzz::distance::levenshtein;
 use regex::Regex;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::string::ToString;
 use std::sync::LazyLock;
 use std::time::Instant;
-use std::string::ToString;
 use unicode_normalization::UnicodeNormalization;
 
 // 定义哈希种子
@@ -22,8 +22,12 @@ static NON_WORD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^\p{Script=Han}\p{L}\p{N}]+").unwrap());
 static LEADING_NUM_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:no\.?|NO\.?\s*)?[#\-]*\d+[#\-]*").unwrap());
-static STOPWORDS: LazyLock<AHashSet<String>> =
-    LazyLock::new(|| ["的", "号", "编号"].iter().map(ToString::to_string).collect());
+static STOPWORDS: LazyLock<AHashSet<String>> = LazyLock::new(|| {
+    ["的", "号", "编号"]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+});
 static GLOBAL_JIEBA: LazyLock<Jieba> = LazyLock::new(Jieba::new);
 static HASHER_BUILDER: LazyLock<RandomState> =
     LazyLock::new(|| RandomState::with_seeds(SEED1, SEED2, SEED3, SEED4));
@@ -86,11 +90,7 @@ impl TextSimilarity {
             return 1.0;
         }
 
-        let char_now = Instant::now();
         let char_sim = self.select_char(&n1, &n2);
-
-        let char_elapsed = char_now.elapsed();
-        println!("Char time elapsed: {char_elapsed:?}");
 
         // 分词缓存
         let token_now = Instant::now();
@@ -116,11 +116,7 @@ impl TextSimilarity {
             return 1.0;
         }
 
-        let char_now = Instant::now();
         let char_sim = self.select_char(&n1, &n2);
-
-        let char_elapsed = char_now.elapsed();
-        println!("Char time elapsed: {char_elapsed:?}");
         char_sim
     }
 
