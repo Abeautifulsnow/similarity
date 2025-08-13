@@ -14,6 +14,8 @@ const SEED1: u64 = 0xc3ab_a7e8_c40b_5426;
 const SEED2: u64 = 0xd2e6_f1a7_b8c9_d0e1;
 const SEED3: u64 = 0x1a2b_3c4d_5e6f_7a8b;
 const SEED4: u64 = 0x9c8d_7e6f_5a4b_3c2d;
+// 短文本阈值
+const SHORT_TEXT_THRESHOLD: usize = 8;
 
 static REMOVE_BRACKETS_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[(\[（【][^)\]）】]*[)\]）】]").unwrap());
@@ -57,7 +59,11 @@ impl TextSimilarity {
             "levenshtein" => SimType::Levenshtein,
             "jaccard" => SimType::Jaccard,
             "simhash" => SimType::Simhash,
-            _ => return Err(PyValueError::new_err("Similarity method")),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Invalid similarity method '{method}'. Valid options are: 'levenshtein', 'jaccard', 'simhash'"
+                )));
+            }
         };
 
         Ok(TextSimilarity {
@@ -80,7 +86,7 @@ impl TextSimilarity {
         }
     }
 
-    fn calculate(&self, s1: &str, s2: &str) -> f64 {
+    fn calculate_similarity(&self, s1: &str, s2: &str, use_tokens: bool) -> f64 {
         // 归一化 - 文本预处理(去除停用词), 生成最终用于比较的标准化文本
         let n1 = self.normalize(s1);
         let n2 = self.normalize(s2);
@@ -90,6 +96,9 @@ impl TextSimilarity {
         }
 
         let char_sim = self.select_char(&n1, &n2);
+        if !use_tokens {
+            return char_sim;
+        }
 
         // 分词缓存
         // 这里是为了获取分词结果, 用于后续的基于词汇的相似度计算
@@ -104,16 +113,12 @@ impl TextSimilarity {
         token_sim.max(char_sim)
     }
 
+    fn calculate(&self, s1: &str, s2: &str) -> f64 {
+        self.calculate_similarity(s1, s2, true)
+    }
+
     fn calculate_simple(&self, s1: &str, s2: &str) -> f64 {
-        let n1 = self.normalize(s1);
-        let n2 = self.normalize(s2);
-
-        if n1.is_empty() && n2.is_empty() {
-            return 1.0;
-        }
-
-        let char_sim = self.select_char(&n1, &n2);
-        char_sim
+        self.calculate_similarity(s1, s2, false)
     }
 
     fn batch_calculate(&self, pairs: Vec<(String, String)>) -> Vec<f64> {
@@ -147,7 +152,15 @@ impl TextSimilarity {
         t = self.non_word_re.replace_all(&t, " ").into_owned();
 
         // collapse spaces and trim first, 再做停用词去除会更准
-        let collapsed = t.split_whitespace().collect::<Vec<&str>>().join(" ");
+        let collapsed =
+            t.split_whitespace()
+                .fold(String::with_capacity(t.len()), |mut acc, word| {
+                    if !acc.is_empty() {
+                        acc.push(' ');
+                    }
+                    acc.push_str(word);
+                    acc
+                });
         // 利用分词过滤停用词，避免多次replace
         let tokens = self.tokenize(&collapsed);
 
@@ -172,7 +185,7 @@ impl TextSimilarity {
 
         let chars: Vec<char> = s.chars().collect::<Vec<char>>();
         // 对短文本直接按字符分割（跳过Jieba）
-        if chars.len() < 10 {
+        if chars.len() < SHORT_TEXT_THRESHOLD {
             chars
                 .into_iter()
                 .map(|c| c.to_string())
@@ -189,6 +202,8 @@ impl TextSimilarity {
         }
     }
 
+    /// 词汇集 `Jaccard` 相似度, 入参可能会经过jieba分词, 如果没有经过jieba分词
+    /// `那么则与jaccard_similarity_chars效果等价`
     fn jaccard_similarity_tokens(&self, tokens1: &[String], tokens2: &[String]) -> f64 {
         if tokens1.is_empty() && tokens2.is_empty() {
             return 1.0;
@@ -233,6 +248,8 @@ impl TextSimilarity {
         1.0 - (xor / 64.0)
     }
 
+    /// 词汇集 `Simhash` 相似度, 入参可能会经过jieba分词, 如果没有经过jieba分词
+    /// `那么则与simhash_similarity_chars效果等价`
     fn simhash_similarity_tokens(&self, tokens1: &[String], tokens2: &[String]) -> f64 {
         let h1 = self.simhash_tokens(tokens1);
         let h2 = self.simhash_tokens(tokens2);
@@ -247,13 +264,13 @@ impl TextSimilarity {
             return 0u64;
         }
 
-        let mut freq: AHashMap<String, i32> = AHashMap::new();
+        let mut freq: AHashMap<&str, i32> = AHashMap::new();
         for t in tokens {
-            *freq.entry(t.clone()).or_insert(0) += 1;
+            *freq.entry(t).or_insert(0) += 1;
         }
 
         for (tok, w) in freq {
-            let h = self.hash_str(&tok);
+            let h = self.hash_str(tok);
             for i in 0..64 {
                 let bit = ((h >> i) & 1) as i32;
                 v[i] += if bit == 1 { w } else { -w };
@@ -451,5 +468,24 @@ mod tests {
         let ts = TextSimilarity::new("simhash").unwrap();
         let fp1 = ts.calculate(s1, s2);
         println!("simhash fp1: {fp1}");
+    }
+
+    #[test]
+    fn test_more_case() {
+        let ts = TextSimilarity::new("jaccard").unwrap();
+        let fp1 = ts.calculate("冷却塔1", "4#冷却塔（ACLQ1-1-1）");
+        println!("calculate fp1: {fp1}");
+
+        let fp2 = ts.calculate("风阀", "制冷系统");
+        println!("calculate fp2: {fp2}");
+
+        let fp3 = ts.calculate("风机", "风机");
+        println!("calculate fp3: {fp3}");
+
+        let fp4 = ts.calculate("分集水器装置设备", "充电桩装置设备");
+        println!("calculate fp4: {fp4}");
+
+        let fp5 = ts.calculate("冷水机组", "冷冻机组");
+        println!("calculate fp5: {fp5}");
     }
 }

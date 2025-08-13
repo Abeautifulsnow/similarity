@@ -12,10 +12,15 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+rust = [
+    "maturin",
+]
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
 bindings = 'pyo3'
 module-name = "similarity_calculate"
 
-[tool.maturin]
-features = ["pyo3/extension-module"]
+[tool.uv]
+concurrent-installs = 2
